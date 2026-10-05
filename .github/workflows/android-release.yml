@@ -15,17 +15,17 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "21"
           cache: gradle
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -112,7 +112,7 @@ jobs:
           source: "DeenWallet-${{ steps.version.outputs.version_name }}.apk"
           target: "/var/www/deenwallet/downloads/"
 
-      - name: Update Oracle Android update metadata
+      - name: Update Android update metadata
         uses: appleboy/ssh-action@v1.0.3
         env:
           VERSION_CODE: ${{ steps.version.outputs.version_code }}
@@ -124,6 +124,7 @@ jobs:
           envs: VERSION_CODE,VERSION_NAME
           script: |
             set -euo pipefail
+
             APP_DIR=/var/www/deenwallet
             ENV_FILE="$APP_DIR/.env"
             APK_NAME="DeenWallet-${VERSION_NAME}.apk"
@@ -134,6 +135,7 @@ jobs:
             upsert_env() {
               key="$1"
               value="$2"
+
               if grep -q "^${key}=" "$ENV_FILE"; then
                 sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
               else
@@ -146,15 +148,15 @@ jobs:
             upsert_env APP_ANDROID_UPDATE_DOWNLOAD_URL "https://deenwallapp.com/downloads/$APK_NAME"
             upsert_env APP_ANDROID_UPDATE_APK_PATH "downloads/$APK_NAME"
 
-            sudo systemctl restart deenwallet
-            sleep 2
-            sudo systemctl is-active --quiet deenwallet
-            echo "Deployed Android update metadata for $VERSION_NAME ($VERSION_CODE)"
+            echo "Android update metadata updated for $VERSION_NAME ($VERSION_CODE)"
+            echo "Backend service was NOT restarted."
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          files: |
-            DeenWallet-${{ steps.version.outputs.version_name }}.apk
-            android/app/build/outputs/bundle/release/app-release.aab
+      -name: Create GitHub Release
+  if: startsWith(github.ref, 'refs/tags/v')
+  uses: softprops/action-gh-release@v2
+  with:
+    generate_release_notes: true
+    files: |
+      DeenWallet-${{ steps.version.outputs.version_name }}.apk
+      android/app/build/outputs/bundle/release/app-release.aab
+      
