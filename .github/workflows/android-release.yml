@@ -51,10 +51,13 @@ jobs:
         run: |
           VERSION_CODE=$(grep -E 'versionCode[[:space:]]+[0-9]+' app/build.gradle | head -1 | awk '{print $2}')
           VERSION_NAME=$(grep -E 'versionName[[:space:]]+"[^"]+"' app/build.gradle | head -1 | sed -E 's/.*versionName[[:space:]]+"([^"]+)".*/\1/')
+
           test -n "$VERSION_CODE"
           test -n "$VERSION_NAME"
+
           echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
           echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+
           echo "Building DeenWallet $VERSION_NAME ($VERSION_CODE)"
 
       - name: Build signed AAB and APK
@@ -72,25 +75,42 @@ jobs:
         run: |
           test -s app/build/outputs/bundle/release/app-release.aab
           test -s app/build/outputs/apk/release/app-release.apk
+
           ls -lh app/build/outputs/bundle/release/app-release.aab
           ls -lh app/build/outputs/apk/release/app-release.apk
 
+      - name: Check Google Play credentials
+        id: play
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          if [ -n "$PLAY_SERVICE_ACCOUNT_JSON" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "Google Play credentials are configured."
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "PLAY_SERVICE_ACCOUNT_JSON is not configured."
+          fi
+
       - name: Upload AAB to Google Play Internal Testing
-        if: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON != '' }}
+        if: steps.play.outputs.configured == 'true'
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
         uses: r0adkll/upload-google-play@v1
         with:
-          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          serviceAccountJsonPlainText: ${{ env.PLAY_SERVICE_ACCOUNT_JSON }}
           packageName: com.deenwallet.app
           releaseFiles: android/app/build/outputs/bundle/release/app-release.aab
           track: internal
           status: completed
 
       - name: Skip Google Play upload
-        if: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON == '' }}
+        if: steps.play.outputs.configured != 'true'
         run: |
+          echo "Google Play upload is being skipped."
           echo "PLAY_SERVICE_ACCOUNT_JSON is not configured."
-          echo "Skipping Google Play upload."
-          echo "The AAB will still be built and the APK will still be deployed to Oracle."
+          echo "The AAB will still be built."
+          echo "The APK will still be deployed to Oracle."
 
       - name: Prepare APK for Oracle
         env:
