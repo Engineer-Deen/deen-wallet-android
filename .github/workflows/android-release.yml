@@ -1,0 +1,148 @@
+name: DeenWallet Android Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release-android:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install web dependencies
+        run: npm ci
+
+      - name: Sync Capacitor Android project
+        run: npx cap sync android
+
+      - name: Decode Android signing keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          test -n "$ANDROID_KEYSTORE_BASE64"
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/deenwallet-release.keystore"
+          test -s "$RUNNER_TEMP/deenwallet-release.keystore"
+
+      - name: Read Android version
+        id: version
+        working-directory: android
+        shell: bash
+        run: |
+          VERSION_CODE=$(grep -E 'versionCode[[:space:]]+[0-9]+' app/build.gradle | head -1 | awk '{print $2}')
+          VERSION_NAME=$(grep -E 'versionName[[:space:]]+"[^"]+"' app/build.gradle | head -1 | sed -E 's/.*versionName[[:space:]]+"([^"]+)".*/\1/')
+          test -n "$VERSION_CODE"
+          test -n "$VERSION_NAME"
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "version_name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          echo "Building DeenWallet $VERSION_NAME ($VERSION_CODE)"
+
+      - name: Build signed AAB and APK
+        working-directory: android
+        env:
+          ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/deenwallet-release.keystore
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          ./gradlew clean bundleRelease assembleRelease --no-daemon
+
+      - name: Verify release artifacts
+        working-directory: android
+        run: |
+          test -s app/build/outputs/bundle/release/app-release.aab
+          test -s app/build/outputs/apk/release/app-release.apk
+          ls -lh app/build/outputs/bundle/release/app-release.aab
+          ls -lh app/build/outputs/apk/release/app-release.apk
+
+      - name: Upload AAB to Google Play Internal Testing
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.deenwallet.app
+          releaseFiles: android/app/build/outputs/bundle/release/app-release.aab
+          track: internal
+          status: completed
+
+      - name: Prepare APK for Oracle
+        env:
+          VERSION_NAME: ${{ steps.version.outputs.version_name }}
+        run: |
+          cp android/app/build/outputs/apk/release/app-release.apk "DeenWallet-${VERSION_NAME}.apk"
+          test -s "DeenWallet-${VERSION_NAME}.apk"
+
+      - name: Upload APK to Oracle
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.OCI_HOST }}
+          username: ${{ secrets.OCI_USERNAME }}
+          key: ${{ secrets.OCI_SSH_KEY }}
+          source: "DeenWallet-${{ steps.version.outputs.version_name }}.apk"
+          target: "/var/www/deenwallet/downloads/"
+
+      - name: Update Oracle Android update metadata
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          VERSION_CODE: ${{ steps.version.outputs.version_code }}
+          VERSION_NAME: ${{ steps.version.outputs.version_name }}
+        with:
+          host: ${{ secrets.OCI_HOST }}
+          username: ${{ secrets.OCI_USERNAME }}
+          key: ${{ secrets.OCI_SSH_KEY }}
+          envs: VERSION_CODE,VERSION_NAME
+          script: |
+            set -euo pipefail
+            APP_DIR=/var/www/deenwallet
+            ENV_FILE="$APP_DIR/.env"
+            APK_NAME="DeenWallet-${VERSION_NAME}.apk"
+
+            test -f "$APP_DIR/downloads/$APK_NAME"
+            test -s "$APP_DIR/downloads/$APK_NAME"
+
+            upsert_env() {
+              key="$1"
+              value="$2"
+              if grep -q "^${key}=" "$ENV_FILE"; then
+                sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
+              else
+                printf '\n%s=%s\n' "$key" "$value" >> "$ENV_FILE"
+              fi
+            }
+
+            upsert_env APP_ANDROID_UPDATE_VERSION_CODE "$VERSION_CODE"
+            upsert_env APP_ANDROID_UPDATE_VERSION_NAME "$VERSION_NAME"
+            upsert_env APP_ANDROID_UPDATE_DOWNLOAD_URL "https://deenwallapp.com/downloads/$APK_NAME"
+            upsert_env APP_ANDROID_UPDATE_APK_PATH "downloads/$APK_NAME"
+
+            sudo systemctl restart deenwallet
+            sleep 2
+            sudo systemctl is-active --quiet deenwallet
+            echo "Deployed Android update metadata for $VERSION_NAME ($VERSION_CODE)"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            DeenWallet-${{ steps.version.outputs.version_name }}.apk
+            android/app/build/outputs/bundle/release/app-release.aab

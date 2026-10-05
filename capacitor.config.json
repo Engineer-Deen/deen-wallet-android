@@ -1,0 +1,9 @@
+  {
+    "appId": "com.deenwallet.app",
+    "appName": "DeenWallet",
+    "webDir": "www",
+    "server": {
+      "androidScheme": "https",
+      "url": "https://api.deenwallapp.com/auth.html"
+    }
+  }

@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "131474366970",
+    "project_id": "deen-wallet-290c1",
+    "storage_bucket": "deen-wallet-290c1.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:131474366970:android:3bc2438feedf6f652f8443",
+        "android_client_info": {
+          "package_name": "com.deenwallet.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAYm3yW-eqvs2MgaFLoFyrxsRVE7gOgTYQ"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="color-scheme" content="dark" />
+  <title>DeenWallet</title>
+  <style>
+    :root {
+      --bg: #0d0d0d;
+      --text: #f2f2f2;
+      --muted: #b8b8b8;
+      --gold: #d4af37;
+      --teal: #0f6e6e;
+    }
+
+    html,
+    body {
+      margin: 0;
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    }
+
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-sizing: border-box;
+      padding: calc(24px + env(safe-area-inset-top, 0px)) 24px calc(24px + env(safe-area-inset-bottom, 0px));
+    }
+
+    .box {
+      width: 100%;
+      max-width: 340px;
+      text-align: center;
+    }
+
+    .icon {
+      display: block;
+      margin: 0 auto 20px;
+    }
+
+    h1 {
+      font-size: 20px;
+      margin: 0 0 10px;
+      color: var(--gold);
+    }
+
+    p {
+      font-size: 14px;
+      color: var(--muted);
+      line-height: 1.5;
+      margin: 0 0 24px;
+    }
+
+    button {
+      background: var(--teal);
+      color: #fff;
+      border: none;
+      border-radius: 999px;
+      padding: 14px 36px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      width: 100%;
+    }
+
+    button:active {
+      opacity: 0.85;
+    }
+
+    button:disabled {
+      opacity: 0.7;
+      cursor: default;
+    }
+
+    button:focus-visible {
+      outline: 2px solid var(--gold);
+      outline-offset: 3px;
+    }
+
+    #status {
+      min-height: 20px;
+      margin: 14px 0 0;
+      font-size: 13px;
+    }
+
+    @media (prefers-reduced-motion: no-preference) {
+      .checking .icon {
+        animation: pulse 1.2s ease-in-out infinite;
+      }
+    }
+
+    @keyframes pulse {
+      50% {
+        opacity: 0.45;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <main class="box" id="box">
+    <svg class="icon" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="#d4af37" stroke-width="1.6"
+      stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M2 8.8a15 15 0 0 1 4.2-2.6" />
+      <path d="M22 8.8a15 15 0 0 0-9.6-4.7" />
+      <path d="M5 12.9a10 10 0 0 1 3.4-2" />
+      <path d="M19 12.9a10 10 0 0 0-3-1.9" />
+      <path d="M8.5 16.4a5 5 0 0 1 7 0" />
+      <circle cx="12" cy="20" r=".6" fill="#d4af37" />
+      <path d="M3 3l18 18" />
+    </svg>
+    <h1 id="title">No internet connection</h1>
+    <p id="message">Turn on Wi-Fi or mobile data, then try again.</p>
+    <button id="retry-btn" type="button">Try again</button>
+    <p id="status" role="status" aria-live="polite"></p>
+  </main>
+
+  <script>
+    (function () {
+      // Used only if this page is opened without a ?retry= address.
+      // Keep in sync with capacitor.config.json's server.url.
+      var DEFAULT_URL = 'https://api.deenwallapp.com/auth.html';
+
+      // MainActivity opens this page as offline.html?retry=<the page that failed>
+      // so a successful retry puts the user back where they were, not on the
+      // login screen.
+      var params = new URLSearchParams(window.location.search);
+      var serverProblem = params.get('reason') === 'server';
+
+      function safeHttpUrl(raw) {
+        try {
+          var u = new URL(raw);
+          return (u.protocol === 'https:' || u.protocol === 'http:') ? u.href : null;
+        } catch (_) {
+          return null;
+        }
+      }
+
+      var targetUrl = safeHttpUrl(params.get('retry')) || DEFAULT_URL;
+      var probeUrl = new URL(targetUrl).origin + '/';
+
+      var box = document.getElementById('box');
+      var titleEl = document.getElementById('title');
+      var messageEl = document.getElementById('message');
+      var statusEl = document.getElementById('status');
+      var btn = document.getElementById('retry-btn');
+
+      // Wait times between automatic checks. A server error starts slower so we
+      // don't hammer a server that is already struggling.
+      var DELAYS = [4000, 8000, 15000, 30000];
+      var delayIndex = serverProblem ? 1 : 0;
+      var timer = null;
+      var probing = false;
+      var leaving = false;
+
+      function render() {
+        if (!navigator.onLine) {
+          titleEl.textContent = 'No internet connection';
+          messageEl.textContent = 'Turn on Wi-Fi or mobile data, then try again.';
+        } else {
+          // Connected to Wi-Fi or mobile data, but the server did not answer.
+          // That is either no real internet behind the connection or our
+          // server being down, and the page can't tell which, so it says both.
+          titleEl.textContent = "Can't connect to DeenWallet";
+          messageEl.textContent = 'Check that your Wi-Fi or mobile data has internet access. If it does, our servers may be busy. We will keep trying.';
+        }
+      }
+
+      function setChecking(on) {
+        btn.disabled = on;
+        btn.textContent = on ? 'Checking\u2026' : 'Try again';
+        box.classList.toggle('checking', on);
+      }
+
+      function schedule() {
+        clearTimeout(timer);
+        var wait = DELAYS[Math.min(delayIndex, DELAYS.length - 1)];
+        delayIndex++;
+        timer = setTimeout(function () { probe(false); }, wait);
+      }
+
+      // Any HTTP response, even an error one, means the network path to the
+      // server works. fetch only rejects when nothing could be reached, which
+      // is exactly what we need to tell apart. no-cors lets this run from a
+      // bundled file page without the server allowing this origin.
+      function probe(manual) {
+        if (probing || leaving) return;
+        probing = true;
+        clearTimeout(timer);
+        setChecking(true);
+        if (manual) statusEl.textContent = '';
+
+        var ctrl = new AbortController();
+        var abortTimer = setTimeout(function () { ctrl.abort(); }, 6000);
+
+        fetch(probeUrl, { method: 'HEAD', mode: 'no-cors', cache: 'no-store', signal: ctrl.signal })
+          .then(function () {
+            clearTimeout(abortTimer);
+            leaving = true;
+            // replace() keeps this page out of the back history.
+            window.location.replace(targetUrl);
+          })
+          .catch(function () {
+            clearTimeout(abortTimer);
+            probing = false;
+            setChecking(false);
+            render();
+            if (manual) statusEl.textContent = 'Still no connection.';
+            schedule();
+          });
+      }
+
+      btn.addEventListener('click', function () {
+        delayIndex = 0;
+        probe(true);
+      });
+
+      window.addEventListener('online', function () {
+        delayIndex = 0;
+        render();
+        probe(false);
+      });
+
+      window.addEventListener('offline', function () {
+        render();
+      });
+
+      // Coming back to the app from the background is a good moment to check.
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible') {
+          delayIndex = 0;
+          probe(false);
+        }
+      });
+
+      render();
+      schedule();
+    })();
+  </script>
+</body>
+
+</html>
