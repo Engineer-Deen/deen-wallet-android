@@ -142,27 +142,40 @@ jobs:
             set -euo pipefail
 
             APP_DIR=/var/www/deenwallet
-            ENV_FILE="$APP_DIR/.env"
+            APK_DIR="$APP_DIR/downloads"
+            METADATA_FILE="$APP_DIR/android-update.json"
             APK_NAME="DeenWallet-${VERSION_NAME}.apk"
 
-            test -f "$APP_DIR/downloads/$APK_NAME"
-            test -s "$APP_DIR/downloads/$APK_NAME"
+            test -f "$APK_DIR/$APK_NAME"
+            test -s "$APK_DIR/$APK_NAME"
 
-            upsert_env() {
-              key="$1"
-              value="$2"
+            VERSION_CODE="$VERSION_CODE" \
+            VERSION_NAME="$VERSION_NAME" \
+            APK_NAME="$APK_NAME" \
+            python3 - <<'PYJSON'
+            import json
+            import os
+            from pathlib import Path
 
-              if grep -q "^${key}=" "$ENV_FILE"; then
-                sed -i "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
-              else
-                printf '\n%s=%s\n' "$key" "$value" >> "$ENV_FILE"
-              fi
+            metadata = {
+                "versionCode": int(os.environ["VERSION_CODE"]),
+                "versionName": os.environ["VERSION_NAME"],
+                "downloadUrl": f"https://deenwallapp.com/downloads/{os.environ['APK_NAME']}",
+                "forceUpdate": False,
+                "releaseNotes": [
+                    "Improved update system",
+                    "Bug fixes"
+                ]
             }
 
-            upsert_env APP_ANDROID_UPDATE_VERSION_CODE "$VERSION_CODE"
-            upsert_env APP_ANDROID_UPDATE_VERSION_NAME "$VERSION_NAME"
-            upsert_env APP_ANDROID_UPDATE_DOWNLOAD_URL "https://deenwallapp.com/downloads/$APK_NAME"
-            upsert_env APP_ANDROID_UPDATE_APK_PATH "downloads/$APK_NAME"
+            target = Path("/var/www/deenwallet/android-update.json")
+            temporary = target.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps(metadata, separators=(",", ":")) + "\n", encoding="utf-8")
+            temporary.replace(target)
+            PYJSON
+
+            test -s "$METADATA_FILE"
+            cat "$METADATA_FILE"
 
             echo "Android update metadata updated for $VERSION_NAME ($VERSION_CODE)"
             echo "Backend service was NOT restarted."
