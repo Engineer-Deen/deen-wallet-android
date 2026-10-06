@@ -40,8 +40,14 @@ jobs:
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         run: |
+          set -euo pipefail
+
           test -n "$ANDROID_KEYSTORE_BASE64"
-          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/deenwallet-release.keystore"
+
+          echo "$ANDROID_KEYSTORE_BASE64" \
+            | base64 --decode \
+            > "$RUNNER_TEMP/deenwallet-release.keystore"
+
           test -s "$RUNNER_TEMP/deenwallet-release.keystore"
 
       - name: Read Android version
@@ -49,8 +55,15 @@ jobs:
         working-directory: android
         shell: bash
         run: |
-          VERSION_CODE=$(grep -E 'versionCode[[:space:]]+[0-9]+' app/build.gradle | head -1 | awk '{print $2}')
-          VERSION_NAME=$(grep -E 'versionName[[:space:]]+"[^"]+"' app/build.gradle | head -1 | sed -E 's/.*versionName[[:space:]]+"([^"]+)".*/\1/')
+          set -euo pipefail
+
+          VERSION_CODE=$(grep -E 'versionCode[[:space:]]+[0-9]+' app/build.gradle \
+            | head -1 \
+            | awk '{print $2}')
+
+          VERSION_NAME=$(grep -E 'versionName[[:space:]]+"[^"]+"' app/build.gradle \
+            | head -1 \
+            | sed -E 's/.*versionName[[:space:]]+"([^"]+)".*/\1/')
 
           test -n "$VERSION_CODE"
           test -n "$VERSION_NAME"
@@ -68,15 +81,22 @@ jobs:
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
+          set -euo pipefail
+
           ./gradlew clean bundleRelease assembleRelease --no-daemon
 
       - name: Verify release artifacts
         working-directory: android
         run: |
+          set -euo pipefail
+
           test -s app/build/outputs/bundle/release/app-release.aab
           test -s app/build/outputs/apk/release/app-release.apk
 
+          echo "AAB:"
           ls -lh app/build/outputs/bundle/release/app-release.aab
+
+          echo "APK:"
           ls -lh app/build/outputs/apk/release/app-release.apk
 
       - name: Check Google Play credentials
@@ -84,12 +104,14 @@ jobs:
         env:
           PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
         run: |
+          set -euo pipefail
+
           if [ -n "$PLAY_SERVICE_ACCOUNT_JSON" ]; then
             echo "configured=true" >> "$GITHUB_OUTPUT"
             echo "Google Play credentials are configured."
           else
             echo "configured=false" >> "$GITHUB_OUTPUT"
-            echo "PLAY_SERVICE_ACCOUNT_JSON is not configured."
+            echo "Google Play credentials are not configured."
           fi
 
       - name: Upload AAB to Google Play Internal Testing
@@ -112,23 +134,29 @@ jobs:
           echo "The AAB will still be built."
           echo "The APK will still be deployed to Oracle."
 
-      - name: Prepare APK for Oracle
-        env:
-          VERSION_NAME: ${{ steps.version.outputs.version_name }}
+      - name: Prepare stable APK for Oracle
         run: |
-          cp android/app/build/outputs/apk/release/app-release.apk "DeenWallet-${VERSION_NAME}.apk"
-          test -s "DeenWallet-${VERSION_NAME}.apk"
+          set -euo pipefail
 
-      - name: Upload APK to Oracle
+          cp \
+            android/app/build/outputs/apk/release/app-release.apk \
+            "DeenWallet.apk"
+
+          test -s "DeenWallet.apk"
+
+          echo "Prepared stable APK:"
+          ls -lh "DeenWallet.apk"
+
+      - name: Upload stable APK to Oracle
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.OCI_HOST }}
           username: ${{ secrets.OCI_USERNAME }}
           key: ${{ secrets.OCI_SSH_KEY }}
-          source: "DeenWallet-${{ steps.version.outputs.version_name }}.apk"
+          source: "DeenWallet.apk"
           target: "/var/www/deenwallet/downloads/"
 
-      - name: Update Android update metadata
+      - name: Verify and update Android production metadata
         uses: appleboy/ssh-action@v1.0.3
         env:
           VERSION_CODE: ${{ steps.version.outputs.version_code }}
@@ -141,13 +169,21 @@ jobs:
           script: |
             set -euo pipefail
 
-            APP_DIR=/var/www/deenwallet
+            APP_DIR="/var/www/deenwallet"
             APK_DIR="$APP_DIR/downloads"
             METADATA_FILE="$APP_DIR/android-update.json"
-            APK_NAME="DeenWallet-${VERSION_NAME}.apk"
+            APK_NAME="DeenWallet.apk"
 
-            test -f "$APK_DIR/$APK_NAME"
-            test -s "$APK_DIR/$APK_NAME"
+            APK_PATH="$APK_DIR/$APK_NAME"
+
+            echo "Checking uploaded APK..."
+            test -f "$APK_PATH"
+            test -s "$APK_PATH"
+
+            echo "Uploaded APK:"
+            ls -lh "$APK_PATH"
+
+            echo "Updating Android metadata..."
 
             VERSION_CODE="$VERSION_CODE" \
             VERSION_NAME="$VERSION_NAME" \
@@ -170,15 +206,44 @@ jobs:
 
             target = Path("/var/www/deenwallet/android-update.json")
             temporary = target.with_suffix(".json.tmp")
-            temporary.write_text(json.dumps(metadata, separators=(",", ":")) + "\n", encoding="utf-8")
+
+            temporary.write_text(
+                json.dumps(metadata, separators=(",", ":")) + "\n",
+                encoding="utf-8"
+            )
+
             temporary.replace(target)
             PYJSON
 
             test -s "$METADATA_FILE"
+
+            echo "Current Android update metadata:"
             cat "$METADATA_FILE"
 
-            echo "Android update metadata updated for $VERSION_NAME ($VERSION_CODE)"
+            echo
+            echo "Android release:"
+            echo "Version: $VERSION_NAME"
+            echo "Version code: $VERSION_CODE"
+            echo "APK: https://deenwallapp.com/downloads/$APK_NAME"
             echo "Backend service was NOT restarted."
+
+      - name: Verify stable APK over HTTPS
+        env:
+          VERSION_NAME: ${{ steps.version.outputs.version_name }}
+        run: |
+          set -euo pipefail
+
+          echo "Checking public APK URL..."
+
+          curl \
+            --fail \
+            --silent \
+            --show-error \
+            --head \
+            "https://deenwallapp.com/downloads/DeenWallet.apk"
+
+          echo
+          echo "Public APK is reachable."
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -186,5 +251,5 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            DeenWallet-${{ steps.version.outputs.version_name }}.apk
+            DeenWallet.apk
             android/app/build/outputs/bundle/release/app-release.aab

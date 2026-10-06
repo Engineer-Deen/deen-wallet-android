@@ -2,7 +2,6 @@ package com.deenwallet.app;
 
 import android.app.AlertDialog;
 import android.app.ProgressDialog;
-import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
@@ -38,17 +37,17 @@ import java.util.concurrent.Executors;
 /**
  * Handles Android application updates for both distribution channels:
  *
- *  1. Google Play installs -> Google Play In-App Updates.
- *  2. Direct APK installs  -> DeenWallet's own update metadata + APK installer.
+ * 1. Google Play installs -> Google Play In-App Updates.
+ * 2. Direct APK installs -> DeenWallet's own update metadata + APK installer.
  *
- * Debug vs release behaviour
- * --------------------------
- *  - Both build types use the same update server (UPDATE_URL, HTTPS only).
- *  - Debug builds re-check after a few seconds, so a freshly bumped server
- *    version shows the pop up on the next app resume.
- *  - Release builds re-check at most once every 6 hours.
+ * Update checking:
+ * - Both build types use the same production update server.
+ * - The server is checked once per app session.
+ * - Repeated onResume calls do not repeatedly hit the server.
+ * - A fresh app launch checks the server again.
  *
- * Watch it work with:  adb logcat -s DeenWalletUpdate
+ * Watch it work with:
+ * adb logcat -s DeenWalletUpdate
  *
  * This class never changes the WebView URL or the web application version.
  */
@@ -65,12 +64,6 @@ public final class DeenWalletUpdateManager {
 
     private static final String PLAY_STORE_PACKAGE = "com.android.vending";
     private static final int PLAY_UPDATE_REQUEST_CODE = 2407;
-
-    private static final long RELEASE_CHECK_INTERVAL_MS = 6L * 60L * 60L * 1000L;
-    private static final long DEBUG_CHECK_INTERVAL_MS = 5_000L;
-
-    private static final String PREFS = "deenwallet_app_updates";
-    private static final String PREF_LAST_CHECK = "last_check_at";
 
     private static final String DEFAULT_NOTES =
             "A newer version of DeenWallet is available with improvements and fixes.";
@@ -93,8 +86,13 @@ public final class DeenWalletUpdateManager {
     private JSONObject pendingUpdate;
     private ProgressDialog progressDialog;
 
+    // Prevent repeated checks caused by multiple onResume callbacks
+    // during the same app session.
+    private boolean hasCheckedThisSession;
+
     public DeenWalletUpdateManager(MainActivity activity) {
         this.activity = activity;
+
         this.debugBuild =
                 (activity.getApplicationInfo().flags
                         & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
@@ -104,7 +102,7 @@ public final class DeenWalletUpdateManager {
     }
 
     // =====================================================================
-    // Public lifecycle API (called from MainActivity)
+    // Public lifecycle API
     // =====================================================================
 
     public void checkForUpdates() {
@@ -115,11 +113,12 @@ public final class DeenWalletUpdateManager {
             return;
         }
 
-        if (!shouldCheck()) {
-            Log.d(TAG, "Check skipped: checked recently");
+        if (hasCheckedThisSession) {
+            Log.d(TAG, "Check skipped: already checked this app session");
             return;
         }
 
+        hasCheckedThisSession = true;
         checking = true;
 
         if (isInstalledFromGooglePlay()) {
@@ -134,12 +133,13 @@ public final class DeenWalletUpdateManager {
     public void onResume() {
         resumePlayUpdateIfInProgress();
 
-        // A pending update stays pending until the user taps "Later" or the
-        // app is updated. This also covers returning from the Android
-        // "install unknown apps" settings screen.
+        // A pending update stays pending until the user taps "Later"
+        // or the app is updated. This also covers returning from the
+        // Android "install unknown apps" settings screen.
         if (pendingUpdate != null
                 && !updateDialogVisible
                 && progressDialog == null) {
+
             mainHandler.post(this::showUpdateDialog);
         }
     }
@@ -147,36 +147,6 @@ public final class DeenWalletUpdateManager {
     public void onDestroy() {
         hideProgress();
         executor.shutdownNow();
-    }
-
-    // =====================================================================
-    // Check throttling
-    // =====================================================================
-
-    private long checkIntervalMs() {
-        return debugBuild ? DEBUG_CHECK_INTERVAL_MS : RELEASE_CHECK_INTERVAL_MS;
-    }
-
-    private boolean shouldCheck() {
-        long last = prefs().getLong(PREF_LAST_CHECK, 0L);
-        long now = System.currentTimeMillis();
-
-        // Clock moved backwards -> never get stuck waiting.
-        if (last > now) return true;
-
-        return now - last >= checkIntervalMs();
-    }
-
-    /**
-     * Only call once the server (or Google Play) actually answered.
-     * A failed or offline check must NOT burn the throttle window.
-     */
-    private void markChecked() {
-        prefs().edit().putLong(PREF_LAST_CHECK, System.currentTimeMillis()).apply();
-    }
-
-    private void finishChecking() {
-        checking = false;
     }
 
     // =====================================================================
@@ -189,10 +159,15 @@ public final class DeenWalletUpdateManager {
         playUpdateManager.getAppUpdateInfo()
                 .addOnSuccessListener(info -> {
                     finishChecking();
-                    markChecked();
 
-                    if (info.updateAvailability() != UpdateAvailability.UPDATE_AVAILABLE) return;
-                    if (!info.isUpdateTypeAllowed(AppUpdateType.IMMEDIATE)) return;
+                    if (info.updateAvailability()
+                            != UpdateAvailability.UPDATE_AVAILABLE) {
+                        return;
+                    }
+
+                    if (!info.isUpdateTypeAllowed(AppUpdateType.IMMEDIATE)) {
+                        return;
+                    }
 
                     startPlayImmediateUpdate(info);
                 })
@@ -208,6 +183,7 @@ public final class DeenWalletUpdateManager {
         playUpdateManager.getAppUpdateInfo().addOnSuccessListener(info -> {
             if (info.updateAvailability()
                     == UpdateAvailability.DEVELOPER_TRIGGERED_UPDATE_IN_PROGRESS) {
+
                 startPlayImmediateUpdate(info);
             }
         });
@@ -215,6 +191,7 @@ public final class DeenWalletUpdateManager {
 
     private void startPlayImmediateUpdate(
             com.google.android.play.core.appupdate.AppUpdateInfo info) {
+
         try {
             playUpdateManager.startUpdateFlowForResult(
                     info,
@@ -233,10 +210,11 @@ public final class DeenWalletUpdateManager {
 
     /**
      * Expected server response:
+     *
      * {
-     *   "versionCode": 2,
-     *   "versionName": "1.1",
-     *   "downloadUrl": "https://.../DeenWallet-1.1.apk",
+     *   "versionCode": 4,
+     *   "versionName": "1.3",
+     *   "downloadUrl": "https://deenwallapp.com/downloads/DeenWallet-1.3.apk",
      *   "forceUpdate": false,
      *   "releaseNotes": ["Bug fixes", "Security improvements"]
      * }
@@ -253,63 +231,97 @@ public final class DeenWalletUpdateManager {
             try {
                 update = fetchAvailableUpdate();
             } catch (Exception e) {
-                Log.w(TAG, "Direct APK update check failed (" + UPDATE_URL + ")", e);
+                Log.w(
+                        TAG,
+                        "Direct APK update check failed (" + UPDATE_URL + ")",
+                        e
+                );
             }
 
             final JSONObject result = update;
 
-            // ALWAYS release the "checking" flag - on every path.
+            // ALWAYS release the "checking" flag.
             mainHandler.post(() -> {
                 finishChecking();
 
                 if (result != null) {
                     Log.i(TAG, "Showing update pop up");
+
                     pendingUpdate = result;
+
                     showUpdateDialog();
                 }
             });
         });
     }
 
-    /** Returns the update JSON if a newer, safely downloadable version exists; otherwise null. */
+    /**
+     * Returns the update JSON if a newer, safely downloadable version exists;
+     * otherwise null.
+     */
     private JSONObject fetchAvailableUpdate() throws Exception {
         HttpURLConnection connection = null;
 
         try {
-            connection = openConnection(UPDATE_URL, 8000, 10000, "application/json");
+            connection = openConnection(
+                    UPDATE_URL,
+                    8000,
+                    10000,
+                    "application/json"
+            );
 
             int status = connection.getResponseCode();
+
             if (status < 200 || status >= 300) {
-                Log.w(TAG, "Direct update endpoint returned HTTP " + status);
+                Log.w(
+                        TAG,
+                        "Direct update endpoint returned HTTP " + status
+                );
                 return null;
             }
 
-            JSONObject update = new JSONObject(readFully(connection.getInputStream()));
+            JSONObject update =
+                    new JSONObject(readFully(connection.getInputStream()));
 
-            // The server answered correctly -> this check counts.
-            markChecked();
+            long latest =
+                    update.optLong("versionCode", 0L);
 
-            long latest = update.optLong("versionCode", 0L);
-            long installed = installedVersionCode();
+            long installed =
+                    installedVersionCode();
 
-            Log.i(TAG, "Server versionCode=" + latest
-                    + ", installed versionCode=" + installed);
+            Log.i(
+                    TAG,
+                    "Server versionCode=" + latest
+                            + ", installed versionCode=" + installed
+            );
 
             if (latest <= installed) {
-                Log.i(TAG, "App is up to date - no pop up");
+                Log.i(
+                        TAG,
+                        "App is up to date - no pop up"
+                );
                 return null;
             }
 
-            String downloadUrl = update.optString("downloadUrl", "").trim();
+            String downloadUrl =
+                    update.optString("downloadUrl", "").trim();
+
             if (!isAllowedDownloadUrl(downloadUrl)) {
-                Log.w(TAG, "Ignoring unsafe/empty direct update URL: '" + downloadUrl + "'");
+                Log.w(
+                        TAG,
+                        "Ignoring unsafe/empty direct update URL: '"
+                                + downloadUrl
+                                + "'"
+                );
                 return null;
             }
 
             return update;
 
         } finally {
-            if (connection != null) connection.disconnect();
+            if (connection != null) {
+                connection.disconnect();
+            }
         }
     }
 
@@ -322,50 +334,88 @@ public final class DeenWalletUpdateManager {
     // =====================================================================
 
     private void showUpdateDialog() {
-        if (pendingUpdate == null || updateDialogVisible || activityGone()) return;
+        if (pendingUpdate == null
+                || updateDialogVisible
+                || activityGone()) {
+            return;
+        }
 
         updateDialogVisible = true;
 
-        String versionName = pendingUpdate.optString("versionName", "new version");
-        String notes = buildReleaseNotes(pendingUpdate.optJSONArray("releaseNotes"));
-        boolean force = pendingUpdate.optBoolean("forceUpdate", false);
+        String versionName =
+                pendingUpdate.optString(
+                        "versionName",
+                        "new version"
+                );
 
-        AlertDialog.Builder builder = new AlertDialog.Builder(activity)
-                .setTitle("DeenWallet update available")
-                .setMessage("Version " + versionName + " is available.\n\n" + notes)
-                .setPositiveButton("Update now", (dialog, which) -> {
-                    updateDialogVisible = false;
-                    downloadAndInstall();
-                });
+        String notes =
+                buildReleaseNotes(
+                        pendingUpdate.optJSONArray("releaseNotes")
+                );
+
+        boolean force =
+                pendingUpdate.optBoolean(
+                        "forceUpdate",
+                        false
+                );
+
+        AlertDialog.Builder builder =
+                new AlertDialog.Builder(activity)
+                        .setTitle("DeenWallet update available")
+                        .setMessage(
+                                "Version "
+                                        + versionName
+                                        + " is available.\n\n"
+                                        + notes
+                        )
+                        .setPositiveButton(
+                                "Update now",
+                                (dialog, which) -> {
+                                    updateDialogVisible = false;
+                                    downloadAndInstall();
+                                }
+                        );
 
         if (!force) {
-            builder.setNegativeButton("Later", (dialog, which) -> {
-                updateDialogVisible = false;
-                pendingUpdate = null;
-            });
+            builder.setNegativeButton(
+                    "Later",
+                    (dialog, which) -> {
+                        updateDialogVisible = false;
+                        pendingUpdate = null;
+                    }
+            );
         }
 
         AlertDialog dialog = builder.create();
 
-        // Only the action buttons may dismiss it: no outside tap, no Back button.
+        // Only the action buttons may dismiss it:
+        // no outside tap and no Back button.
         dialog.setCanceledOnTouchOutside(false);
         dialog.setCancelable(false);
         dialog.show();
     }
 
     private String buildReleaseNotes(JSONArray notes) {
-        if (notes == null || notes.length() == 0) return DEFAULT_NOTES;
+        if (notes == null || notes.length() == 0) {
+            return DEFAULT_NOTES;
+        }
 
         StringBuilder result = new StringBuilder();
 
         for (int i = 0; i < notes.length(); i++) {
-            String note = notes.optString(i, "").trim();
+            String note =
+                    notes.optString(i, "").trim();
+
             if (!note.isEmpty()) {
-                result.append("• ").append(note).append('\n');
+                result.append("• ")
+                        .append(note)
+                        .append('\n');
             }
         }
 
-        return result.length() == 0 ? DEFAULT_NOTES : result.toString().trim();
+        return result.length() == 0
+                ? DEFAULT_NOTES
+                : result.toString().trim();
     }
 
     // =====================================================================
@@ -375,10 +425,19 @@ public final class DeenWalletUpdateManager {
     private void downloadAndInstall() {
         if (pendingUpdate == null) return;
 
-        String downloadUrl = pendingUpdate.optString("downloadUrl", "").trim();
+        String downloadUrl =
+                pendingUpdate
+                        .optString("downloadUrl", "")
+                        .trim();
 
         if (!isAllowedDownloadUrl(downloadUrl)) {
-            Log.w(TAG, "Blocked unsafe APK download URL: '" + downloadUrl + "'");
+            Log.w(
+                    TAG,
+                    "Blocked unsafe APK download URL: '"
+                            + downloadUrl
+                            + "'"
+            );
+
             pendingUpdate = null;
             return;
         }
@@ -388,7 +447,11 @@ public final class DeenWalletUpdateManager {
         showProgress();
 
         executor.execute(() -> {
-            File apk = new File(activity.getCacheDir(), "DeenWallet-update.apk");
+            File apk =
+                    new File(
+                            activity.getCacheDir(),
+                            "DeenWallet-update.apk"
+                    );
 
             try {
                 downloadApk(downloadUrl, apk);
@@ -399,42 +462,69 @@ public final class DeenWalletUpdateManager {
                 });
 
             } catch (Exception e) {
-                Log.e(TAG, "Direct APK download failed", e);
+                Log.e(
+                        TAG,
+                        "Direct APK download failed",
+                        e
+                );
 
                 mainHandler.post(() -> {
                     hideProgress();
+
                     if (!activityGone()) {
-                        showMessage("Update failed",
+                        showMessage(
+                                "Update failed",
                                 "DeenWallet could not download the update. "
-                                        + "Please try again later.");
+                                        + "Please try again later."
+                        );
                     }
                 });
             }
         });
     }
 
-    private void downloadApk(String downloadUrl, File target) throws Exception {
+    private void downloadApk(
+            String downloadUrl,
+            File target) throws Exception {
+
         if (target.exists() && !target.delete()) {
-            throw new IllegalStateException("Could not replace old update file");
+            throw new IllegalStateException(
+                    "Could not replace old update file"
+            );
         }
 
         HttpURLConnection connection = null;
 
         try {
-            connection = openConnection(downloadUrl, 10000, 20000,
-                    "application/vnd.android.package-archive");
+            connection = openConnection(
+                    downloadUrl,
+                    10000,
+                    20000,
+                    "application/vnd.android.package-archive"
+            );
 
             int status = connection.getResponseCode();
+
             if (status < 200 || status >= 300) {
-                throw new IllegalStateException("Download failed with HTTP " + status);
+                throw new IllegalStateException(
+                        "Download failed with HTTP " + status
+                );
             }
 
-            int total = connection.getContentLength();
+            int total =
+                    connection.getContentLength();
+
             long downloaded = 0;
 
-            try (InputStream input = new BufferedInputStream(connection.getInputStream());
-                 FileOutputStream output = new FileOutputStream(target)) {
+            try (
+                    InputStream input =
+                            new BufferedInputStream(
+                                    connection.getInputStream()
+                            );
 
+                    FileOutputStream output =
+                            new FileOutputStream(target)
+            ) {
                 byte[] buffer = new byte[8192];
                 int read;
 
@@ -443,18 +533,29 @@ public final class DeenWalletUpdateManager {
                     downloaded += read;
 
                     if (total > 0) {
-                        int progress = (int) ((downloaded * 100L) / total);
-                        mainHandler.post(() -> updateProgress(progress));
+                        int progress =
+                                (int) (
+                                        (downloaded * 100L)
+                                                / total
+                                );
+
+                        mainHandler.post(
+                                () -> updateProgress(progress)
+                        );
                     }
                 }
             }
 
             if (downloaded <= 0) {
-                throw new IllegalStateException("Downloaded APK is empty");
+                throw new IllegalStateException(
+                        "Downloaded APK is empty"
+                );
             }
 
         } finally {
-            if (connection != null) connection.disconnect();
+            if (connection != null) {
+                connection.disconnect();
+            }
         }
     }
 
@@ -463,10 +564,21 @@ public final class DeenWalletUpdateManager {
     // =====================================================================
 
     private void showProgress() {
-        progressDialog = new ProgressDialog(activity);
-        progressDialog.setTitle("Updating DeenWallet");
-        progressDialog.setMessage("Downloading update…");
-        progressDialog.setProgressStyle(ProgressDialog.STYLE_HORIZONTAL);
+        progressDialog =
+                new ProgressDialog(activity);
+
+        progressDialog.setTitle(
+                "Updating DeenWallet"
+        );
+
+        progressDialog.setMessage(
+                "Downloading update…"
+        );
+
+        progressDialog.setProgressStyle(
+                ProgressDialog.STYLE_HORIZONTAL
+        );
+
         progressDialog.setIndeterminate(true);
         progressDialog.setCancelable(false);
         progressDialog.show();
@@ -502,43 +614,76 @@ public final class DeenWalletUpdateManager {
         if (activityGone()) return;
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                && !activity.getPackageManager().canRequestPackageInstalls()) {
+                && !activity.getPackageManager()
+                .canRequestPackageInstalls()) {
+
             askForInstallPermission();
             return;
         }
 
         try {
-            Uri uri = FileProvider.getUriForFile(
-                    activity,
-                    activity.getPackageName() + ".fileprovider",
-                    apk
+            Uri uri =
+                    FileProvider.getUriForFile(
+                            activity,
+                            activity.getPackageName()
+                                    + ".fileprovider",
+                            apk
+                    );
+
+            Intent intent =
+                    new Intent(Intent.ACTION_VIEW);
+
+            intent.setDataAndType(
+                    uri,
+                    "application/vnd.android.package-archive"
             );
 
-            Intent intent = new Intent(Intent.ACTION_VIEW);
-            intent.setDataAndType(uri, "application/vnd.android.package-archive");
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    | Intent.FLAG_ACTIVITY_NEW_TASK);
+            intent.addFlags(
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            | Intent.FLAG_ACTIVITY_NEW_TASK
+            );
 
             activity.startActivity(intent);
 
         } catch (Exception e) {
-            Log.e(TAG, "Could not launch APK installer", e);
-            showMessage("Update could not start",
-                    "Android could not open the downloaded update.");
+            Log.e(
+                    TAG,
+                    "Could not launch APK installer",
+                    e
+            );
+
+            showMessage(
+                    "Update could not start",
+                    "Android could not open the downloaded update."
+            );
         }
     }
 
     private void askForInstallPermission() {
         new AlertDialog.Builder(activity)
                 .setTitle("Allow DeenWallet updates")
-                .setMessage("Android needs permission to install updates downloaded "
-                        + "directly from DeenWallet. Enable 'Allow from this source', "
-                        + "then return to DeenWallet and tap Update again.")
-                .setPositiveButton("Open settings", (dialog, which) ->
-                        activity.startActivity(new Intent(
-                                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                                Uri.parse("package:" + activity.getPackageName()))))
-                .setNegativeButton("Cancel", null)
+                .setMessage(
+                        "Android needs permission to install updates downloaded "
+                                + "directly from DeenWallet. Enable 'Allow from this source', "
+                                + "then return to DeenWallet and tap Update again."
+                )
+                .setPositiveButton(
+                        "Open settings",
+                        (dialog, which) ->
+                                activity.startActivity(
+                                        new Intent(
+                                                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                                Uri.parse(
+                                                        "package:"
+                                                                + activity.getPackageName()
+                                                )
+                                        )
+                                )
+                )
+                .setNegativeButton(
+                        "Cancel",
+                        null
+                )
                 .show();
     }
 
@@ -547,14 +692,18 @@ public final class DeenWalletUpdateManager {
     // =====================================================================
 
     private boolean activityGone() {
-        return activity.isFinishing() || activity.isDestroyed();
+        return activity.isFinishing()
+                || activity.isDestroyed();
     }
 
-    private android.content.SharedPreferences prefs() {
-        return activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+    private void finishChecking() {
+        checking = false;
     }
 
-    private void showMessage(String title, String message) {
+    private void showMessage(
+            String title,
+            String message) {
+
         new AlertDialog.Builder(activity)
                 .setTitle(title)
                 .setMessage(message)
@@ -563,36 +712,68 @@ public final class DeenWalletUpdateManager {
     }
 
     private HttpURLConnection openConnection(
-            String url, int connectTimeoutMs, int readTimeoutMs, String accept)
-            throws Exception {
+            String url,
+            int connectTimeoutMs,
+            int readTimeoutMs,
+            String accept) throws Exception {
 
-        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
-        connection.setConnectTimeout(connectTimeoutMs);
-        connection.setReadTimeout(readTimeoutMs);
+        HttpURLConnection connection =
+                (HttpURLConnection)
+                        new URL(url).openConnection();
+
+        connection.setConnectTimeout(
+                connectTimeoutMs
+        );
+
+        connection.setReadTimeout(
+                readTimeoutMs
+        );
+
         connection.setRequestMethod("GET");
-        connection.setRequestProperty("Accept", accept);
+
+        connection.setRequestProperty(
+                "Accept",
+                accept
+        );
+
         connection.setUseCaches(false);
+
         return connection;
     }
 
-    private String readFully(InputStream stream) throws Exception {
-        ByteArrayOutputStream body = new ByteArrayOutputStream();
+    private String readFully(
+            InputStream stream) throws Exception {
 
-        try (InputStream input = new BufferedInputStream(stream)) {
+        ByteArrayOutputStream body =
+                new ByteArrayOutputStream();
+
+        try (
+                InputStream input =
+                        new BufferedInputStream(stream)
+        ) {
             byte[] buffer = new byte[8192];
             int read;
+
             while ((read = input.read(buffer)) != -1) {
                 body.write(buffer, 0, read);
             }
         }
 
-        return body.toString(StandardCharsets.UTF_8.name());
+        return body.toString(
+                StandardCharsets.UTF_8.name()
+        );
     }
 
     @SuppressWarnings("deprecation")
-    private long installedVersionCode() throws Exception {
-        PackageInfo info = activity.getPackageManager()
-                .getPackageInfo(activity.getPackageName(), 0);
+    private long installedVersionCode()
+            throws Exception {
+
+        PackageInfo info =
+                activity.getPackageManager()
+                        .getPackageInfo(
+                                activity.getPackageName(),
+                                0
+                        );
 
         return Build.VERSION.SDK_INT >= Build.VERSION_CODES.P
                 ? info.getLongVersionCode()
@@ -605,18 +786,29 @@ public final class DeenWalletUpdateManager {
             String installer;
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                installer = activity.getPackageManager()
-                        .getInstallSourceInfo(activity.getPackageName())
-                        .getInstallingPackageName();
+                installer =
+                        activity.getPackageManager()
+                                .getInstallSourceInfo(
+                                        activity.getPackageName()
+                                )
+                                .getInstallingPackageName();
             } else {
-                installer = activity.getPackageManager()
-                        .getInstallerPackageName(activity.getPackageName());
+                installer =
+                        activity.getPackageManager()
+                                .getInstallerPackageName(
+                                        activity.getPackageName()
+                                );
             }
 
             return PLAY_STORE_PACKAGE.equals(installer);
 
         } catch (Exception e) {
-            Log.w(TAG, "Could not determine installation source", e);
+            Log.w(
+                    TAG,
+                    "Could not determine installation source",
+                    e
+            );
+
             return false;
         }
     }
