@@ -1,6 +1,6 @@
   {
     "appId": "com.deenwallet.app",
-    "appName": "DeenWallet",
+    "appName": "DeenWallet Transfer",
     "webDir": "www",
     "server": {
       "androidScheme": "https",

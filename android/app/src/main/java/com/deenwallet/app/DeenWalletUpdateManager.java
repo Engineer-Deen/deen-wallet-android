@@ -66,7 +66,7 @@ public final class DeenWalletUpdateManager {
     private static final int PLAY_UPDATE_REQUEST_CODE = 2407;
 
     private static final String DEFAULT_NOTES =
-            "A newer version of DeenWallet is available with improvements and fixes.";
+            "A newer version of DeenWallet Transfer is available with improvements and fixes.";
 
     // =====================================================================
     // State
@@ -361,7 +361,7 @@ public final class DeenWalletUpdateManager {
 
         AlertDialog.Builder builder =
                 new AlertDialog.Builder(activity)
-                        .setTitle("DeenWallet update available")
+                        .setTitle("DeenWallet Transfer update available")
                         .setMessage(
                                 "Version "
                                         + versionName
@@ -474,7 +474,7 @@ public final class DeenWalletUpdateManager {
                     if (!activityGone()) {
                         showMessage(
                                 "Update failed",
-                                "DeenWallet could not download the update. "
+                                "DeenWallet Transfer could not download the update. "
                                         + "Please try again later."
                         );
                     }
@@ -568,7 +568,7 @@ public final class DeenWalletUpdateManager {
                 new ProgressDialog(activity);
 
         progressDialog.setTitle(
-                "Updating DeenWallet"
+                "Updating DeenWallet Transfer"
         );
 
         progressDialog.setMessage(
@@ -661,11 +661,11 @@ public final class DeenWalletUpdateManager {
 
     private void askForInstallPermission() {
         new AlertDialog.Builder(activity)
-                .setTitle("Allow DeenWallet updates")
+                .setTitle("Allow DeenWallet Transfer updates")
                 .setMessage(
                         "Android needs permission to install updates downloaded "
-                                + "directly from DeenWallet. Enable 'Allow from this source', "
-                                + "then return to DeenWallet and tap Update again."
+                                + "directly from DeenWallet Transfer. Enable 'Allow from this source', "
+                                + "then return to DeenWallet Transfer and tap Update again."
                 )
                 .setPositiveButton(
                         "Open settings",
