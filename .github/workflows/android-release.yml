@@ -83,21 +83,33 @@ jobs:
         run: |
           set -euo pipefail
 
-          ./gradlew clean bundleRelease assembleRelease --no-daemon
+          ./gradlew clean bundlePlayRelease assembleDirectRelease --no-daemon
 
       - name: Verify release artifacts
         working-directory: android
         run: |
           set -euo pipefail
 
-          test -s app/build/outputs/bundle/release/app-release.aab
-          test -s app/build/outputs/apk/release/app-release.apk
+          test -s app/build/outputs/bundle/playRelease/app-play-release.aab
+          test -s app/build/outputs/apk/direct/release/app-direct-release.apk
 
           echo "AAB:"
-          ls -lh app/build/outputs/bundle/release/app-release.aab
+          ls -lh app/build/outputs/bundle/playRelease/app-play-release.aab
 
           echo "APK:"
-          ls -lh app/build/outputs/apk/release/app-release.apk
+          ls -lh app/build/outputs/apk/direct/release/app-direct-release.apk
+
+      - name: Guard Play build has no APK-install permission
+        run: |
+          set -euo pipefail
+
+          if unzip -p android/app/build/outputs/bundle/playRelease/app-play-release.aab \
+               base/manifest/AndroidManifest.xml | grep -aq REQUEST_INSTALL_PACKAGES; then
+            echo "Play build still contains REQUEST_INSTALL_PACKAGES"
+            exit 1
+          fi
+
+          echo "Play build is clean."
 
       - name: Check Google Play credentials
         id: play
@@ -116,13 +128,14 @@ jobs:
 
       - name: Upload AAB to Google Play Internal Testing
         if: steps.play.outputs.configured == 'true'
+        continue-on-error: true
         env:
           PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
         uses: r0adkll/upload-google-play@v1
         with:
           serviceAccountJsonPlainText: ${{ env.PLAY_SERVICE_ACCOUNT_JSON }}
           packageName: com.deenwallet.app
-          releaseFiles: android/app/build/outputs/bundle/release/app-release.aab
+          releaseFiles: android/app/build/outputs/bundle/playRelease/app-play-release.aab
           track: internal
           status: completed
 
@@ -139,7 +152,7 @@ jobs:
           set -euo pipefail
 
           cp \
-            android/app/build/outputs/apk/release/app-release.apk \
+            android/app/build/outputs/apk/direct/release/app-direct-release.apk \
             "DeenWallet.apk"
 
           test -s "DeenWallet.apk"
@@ -252,4 +265,4 @@ jobs:
           generate_release_notes: true
           files: |
             DeenWallet.apk
-            android/app/build/outputs/bundle/release/app-release.aab
+            android/app/build/outputs/bundle/playRelease/app-play-release.aab
